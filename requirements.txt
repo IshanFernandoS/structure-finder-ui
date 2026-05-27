@@ -1,0 +1,12 @@
+openai>=1.70.0
+numpy>=1.26
+scikit-image>=0.23
+trimesh>=4.0
+pymupdf>=1.24
+pillow>=10.0
+opencv-python-headless>=4.9
+scipy>=1.11
+streamlit>=1.36
+plotly>=5.22
+shapely>=2.0
+mapbox-earcut>=1.0

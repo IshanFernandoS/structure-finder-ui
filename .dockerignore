@@ -1,0 +1,22 @@
+.venv/
+__pycache__/
+.cache/
+.env
+.streamlit/secrets.toml
+structure_finder_runs/
+universal_ui_runs/
+ui_runs/
+paper_to_stl_output/
+universal_paper_to_stl_output/
+universal_agent_smoke_test/
+local_test_output/
+test_output/
+test_output_venv/
+output_stl/
+*.pyc
+*.pyo
+*.log
+*.zip
+*.stl
+paper.pdf
+Elastically isotropic auxetic and zero-Poisson s ratio TPMS-based metamaterials.pdf

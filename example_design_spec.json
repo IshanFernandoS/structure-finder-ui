@@ -1,0 +1,73 @@
+{
+  "paper_title": "Example TPMS paper",
+  "overall_reconstruction_summary": "Example only: Primitive TPMS box generated from two level sets.",
+  "global_assumptions": [
+    "This is a synthetic example."
+  ],
+  "global_missing_information": [],
+  "structures": [
+    {
+      "name": "Example_Primitive_TPMS",
+      "generator_type": "tpms_implicit",
+      "reconstruction_level": "exact_from_equation",
+      "confidence_0_to_1": 0.85,
+      "evidence_used": [
+        "Synthetic example"
+      ],
+      "assumptions": [
+        "No face sheets."
+      ],
+      "missing_information": [],
+      "dimensions_mm": {
+        "width": 30.0,
+        "height": 30.0,
+        "depth": 30.0,
+        "unit_cell_size": 10.0,
+        "unit_count_x": 3,
+        "unit_count_y": 3,
+        "unit_count_z": 3,
+        "face_sheet_thickness": 0.0
+      },
+      "tpms_parameters": {
+        "family": "primitive",
+        "level_low": -0.35,
+        "level_high": 0.35,
+        "iso_value": 0.0,
+        "sheet_half_thickness": 0.2,
+        "shape_mapping_n": 0.0,
+        "notes": "Primitive field: cos(x)+cos(y)+cos(z)"
+      },
+      "image_trace": {
+        "page_number": 1,
+        "crop_box_rel": [
+          0.0,
+          0.0,
+          1.0,
+          1.0
+        ],
+        "solid_is_dark": true,
+        "notes": "Not used."
+      },
+      "implicit_equation": {
+        "expression": "",
+        "level_low": 0.0,
+        "level_high": 0.0,
+        "iso_value": 0.0,
+        "sheet_half_thickness": 0.0,
+        "period_x": 0.0,
+        "period_y": 0.0,
+        "period_z": 0.0,
+        "notes": "Not used."
+      },
+      "beam_lattice": {
+        "nodes": [],
+        "edges": [],
+        "coordinate_mode": "fractional_unit_cell",
+        "strut_radius_mm": 0.0,
+        "node_radius_mm": 0.0,
+        "notes": "Not used."
+      },
+      "unsupported_reason": ""
+    }
+  ]
+}
