@@ -33,6 +33,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import traceback
 import zipfile
 from pathlib import Path
@@ -619,6 +620,7 @@ def call_responses_json(
     schema_name: str,
     reasoning_effort: Optional[str] = None,
     progress: Optional[Callable[[str], None]] = None,
+    strict_schema: bool = True,
 ) -> Dict[str, Any]:
     candidates = [model.strip() or DEFAULT_MODEL]
     for fallback in MODEL_FALLBACKS:
@@ -627,65 +629,155 @@ def call_responses_json(
 
     last_error: Optional[Exception] = None
     for candidate in candidates:
-        request_args: Dict[str, Any] = {
-            "model": candidate,
-            "input": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ],
-            "text": {
-                "format": {
-                    "type": "json_schema",
-                    "name": schema_name,
-                    "strict": True,
-                    "schema": schema,
-                }
-            },
-        }
+        reasoning_variants: List[Optional[str]] = [reasoning_effort]
         if reasoning_effort and reasoning_effort not in {"none", "auto"}:
-            request_args["reasoning"] = {"effort": reasoning_effort}
+            reasoning_variants.append(None)
 
-        try:
-            emit(progress, f"[INFO] Calling OpenAI model: {candidate}")
-            response = client.responses.create(**request_args)
-            data = json.loads(response.output_text)
-            data["_model_used"] = candidate
-            return data
-        except Exception as exc:
-            last_error = exc
-            if "reasoning" in request_args:
+        for reasoning_variant in reasoning_variants:
+            for attempt in range(2):
+                request_args: Dict[str, Any] = {
+                    "model": candidate,
+                    "input": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_content},
+                    ],
+                    "text": {
+                        "format": {
+                            "type": "json_schema",
+                            "name": schema_name,
+                            "strict": strict_schema,
+                            "schema": schema,
+                        }
+                    },
+                }
+                if reasoning_variant and reasoning_variant not in {"none", "auto"}:
+                    request_args["reasoning"] = {"effort": reasoning_variant}
+
                 try:
-                    request_args.pop("reasoning", None)
-                    emit(progress, f"[WARN] Retrying {candidate} without reasoning effort.")
+                    effort_label = reasoning_variant or "none"
+                    emit(progress, f"[INFO] Calling OpenAI model: {candidate} (reasoning: {effort_label})")
                     response = client.responses.create(**request_args)
                     data = json.loads(response.output_text)
                     data["_model_used"] = candidate
-                    data["_reasoning_fallback_used"] = True
+                    data["_strict_schema_used"] = strict_schema
+                    if reasoning_variant is None and reasoning_effort and reasoning_effort not in {"none", "auto"}:
+                        data["_reasoning_fallback_used"] = True
                     return data
-                except Exception as retry_exc:
-                    last_error = retry_exc
+                except Exception as exc:
+                    last_error = exc
+                    emit(progress, f"[WARN] OpenAI request failed with {candidate}: {exc}")
+                    if attempt == 0:
+                        time.sleep(2.0)
 
-            message = str(last_error).lower()
-            model_related = any(
-                token in message
-                for token in [
-                    "model",
-                    "does not exist",
-                    "not found",
-                    "unsupported",
-                    "invalid",
-                    "access",
-                    "permission",
-                ]
-            )
-            if candidate != candidates[-1] and model_related:
-                emit(progress, f"[WARN] Model {candidate} failed; trying fallback model.")
-                continue
-            raise last_error
+        if candidate != candidates[-1]:
+            emit(progress, f"[WARN] Trying fallback model after {candidate} failed.")
+            continue
 
     if last_error:
         raise last_error
     raise RuntimeError("OpenAI request failed before any model was attempted.")
+
+
+def _structure_defaults() -> Dict[str, Any]:
+    return {
+        "name": "Unnamed structure",
+        "metamaterial_type": "unknown",
+        "generator_type": "manual_review",
+        "reconstruction_level": "insufficient",
+        "confidence_0_to_1": 0.0,
+        "evidence_sources": [],
+        "equations_used": [],
+        "parameter_records": [],
+        "dimensions_mm": {
+            "width_x": None,
+            "height_y": None,
+            "depth_z": None,
+            "unit_cell_size_x": None,
+            "unit_cell_size_y": None,
+            "unit_cell_size_z": None,
+            "unit_count_x": None,
+            "unit_count_y": None,
+            "unit_count_z": None,
+            "wall_or_strut_thickness": None,
+            "face_sheet_thickness": None,
+            "outer_radius": None,
+            "inner_radius": None,
+            "tube_height": None,
+        },
+        "tpms_parameters": {
+            "family": "unknown",
+            "custom_expression": "",
+            "level_low": None,
+            "level_high": None,
+            "iso_value": None,
+            "sheet_half_thickness": None,
+            "period_x": None,
+            "period_y": None,
+            "period_z": None,
+            "requires_mapping": False,
+            "mapping_description": "",
+        },
+        "topology_description": {
+            "unit_cell_description": "",
+            "connectivity_description": "",
+            "array_or_repetition_rule": "",
+            "boundary_or_face_sheet_rule": "",
+            "hybrid_combination_rule": "",
+        },
+        "figure_trace_info": {
+            "needs_figure_tracing": False,
+            "best_page_number": None,
+            "figure_label": "",
+            "crop_box_relative": [0.0, 0.0, 1.0, 1.0],
+            "solid_is_dark": True,
+            "scale_reference": "",
+        },
+        "construction_steps": [],
+        "assumptions": [],
+        "missing_information": [],
+        "stl_generation_plan": {
+            "method": "manual_review",
+            "description": "",
+            "requires_custom_code": False,
+            "expected_output_files": [],
+            "mesh_validation_targets": [],
+        },
+    }
+
+
+def normalize_reconstruction_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(plan, dict):
+        raise RuntimeError("Model did not return a JSON object for the reconstruction plan.")
+
+    plan.setdefault("paper_title", "Unknown")
+    plan.setdefault("doi_or_identifier", "")
+    plan.setdefault("reconstruction_summary", "")
+    plan.setdefault("overall_confidence_0_to_1", 0.0)
+    plan.setdefault("can_generate_stl", False)
+    plan.setdefault("reason_if_not_generatable", "")
+    plan.setdefault("global_missing_information", [])
+    plan.setdefault("global_assumptions", [])
+    plan.setdefault("structures", [])
+
+    if not isinstance(plan.get("structures"), list):
+        plan["structures"] = []
+
+    normalized_structures = []
+    for structure in plan.get("structures", []):
+        if not isinstance(structure, dict):
+            continue
+        base = _structure_defaults()
+        base.update({k: v for k, v in structure.items() if k not in base or not isinstance(base[k], dict)})
+        for key in ["dimensions_mm", "tpms_parameters", "topology_description", "figure_trace_info", "stl_generation_plan"]:
+            merged = _structure_defaults()[key]
+            merged.update(structure.get(key, {}) if isinstance(structure.get(key, {}), dict) else {})
+            base[key] = merged
+        for key in ["evidence_sources", "equations_used", "parameter_records", "construction_steps", "assumptions", "missing_information"]:
+            if not isinstance(base.get(key), list):
+                base[key] = []
+        normalized_structures.append(base)
+    plan["structures"] = normalized_structures
+    return plan
 
 
 def upload_file(client: Any, path: Path, purpose: str = "user_data") -> Any:
@@ -710,19 +802,37 @@ def extract_reconstruction_plan(
     pdf_file = upload_file(client, pdf_path)
 
     emit(progress, "[INFO] Extracting reconstruction plan...")
-    plan = call_responses_json(
-        client=client,
-        model=model,
-        system_prompt=SYSTEM_PROMPT,
-        user_content=[
-            {"type": "input_file", "file_id": pdf_file.id},
-            {"type": "input_text", "text": prompt},
-        ],
-        schema=DESIGN_SCHEMA,
-        schema_name="metamaterial_reconstruction_plan",
-        reasoning_effort=reasoning_effort,
-        progress=progress,
-    )
+    user_content = [
+        {"type": "input_file", "file_id": pdf_file.id},
+        {"type": "input_text", "text": prompt},
+    ]
+    try:
+        plan = call_responses_json(
+            client=client,
+            model=model,
+            system_prompt=SYSTEM_PROMPT,
+            user_content=user_content,
+            schema=DESIGN_SCHEMA,
+            schema_name="metamaterial_reconstruction_plan",
+            reasoning_effort=reasoning_effort,
+            progress=progress,
+            strict_schema=True,
+        )
+    except Exception:
+        (out_dir / "plan_extraction_strict_error.txt").write_text(traceback.format_exc(), encoding="utf-8")
+        emit(progress, "[WARN] Strict plan extraction failed. Retrying with relaxed schema validation.")
+        plan = call_responses_json(
+            client=client,
+            model=model,
+            system_prompt=SYSTEM_PROMPT,
+            user_content=user_content,
+            schema=DESIGN_SCHEMA,
+            schema_name="metamaterial_reconstruction_plan_relaxed",
+            reasoning_effort="medium",
+            progress=progress,
+            strict_schema=False,
+        )
+    plan = normalize_reconstruction_plan(plan)
     write_json(out_dir / "reconstruction_plan.json", plan)
     return plan
 

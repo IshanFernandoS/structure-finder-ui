@@ -273,9 +273,12 @@ def main() -> None:
                 st.write(f"Bundle: {bundle}")
             except Exception as exc:
                 error_log = out_dir / "app_error.txt"
-                error_log.write_text(str(exc), encoding="utf-8")
+                import traceback
+
+                error_log.write_text(traceback.format_exc(), encoding="utf-8")
                 status.update(label="Failed", state="error")
                 st.error(str(exc))
+                st.caption(f"Full error log: {error_log}")
                 return
 
     if st.session_state.last_run_dir is None:
