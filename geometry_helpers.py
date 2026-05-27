@@ -98,6 +98,30 @@ def smooth_mesh(
     return smoothed
 
 
+def simplify_mesh_for_export(mesh: trimesh.Trimesh, max_faces: int | None = 800_000) -> tuple[trimesh.Trimesh, dict]:
+    original_faces = int(len(mesh.faces))
+    report = {
+        "original_faces_before_export_cap": original_faces,
+        "max_export_faces": int(max_faces) if max_faces else None,
+        "decimated_for_size": False,
+        "decimation_error": "",
+    }
+    if not max_faces or original_faces <= max_faces:
+        return mesh, report
+
+    try:
+        reduced = mesh.simplify_quadric_decimation(face_count=int(max_faces), aggression=7)
+        if len(reduced.faces) > 0 and len(reduced.vertices) > 0:
+            _clean_mesh_faces(reduced)
+            reduced.fix_normals()
+            report["decimated_for_size"] = True
+            return reduced, report
+    except Exception as exc:
+        report["decimation_error"] = str(exc)
+
+    return mesh, report
+
+
 def fit_mesh_to_bounds(
     mesh: trimesh.Trimesh,
     size: Tuple[float, float, float],
@@ -130,6 +154,7 @@ def export_mesh(
     mesh: trimesh.Trimesh,
     path: str | Path,
     smooth_iterations: int = 0,
+    max_faces: int | None = 800_000,
     zip_output: bool = True,
 ) -> dict:
     path = Path(path)
@@ -137,6 +162,7 @@ def export_mesh(
 
     _clean_mesh_faces(mesh)
     mesh.fix_normals()
+    mesh, size_report = simplify_mesh_for_export(mesh, max_faces=max_faces)
 
     # Keep default smoothing as 0 for paper reconstruction.
     if smooth_iterations > 0:
@@ -157,6 +183,8 @@ def export_mesh(
     report = mesh_validation_report(loaded)
     report["file"] = str(path)
     report["smoothing_iterations"] = int(smooth_iterations)
+    report["stl_size_mb"] = round(path.stat().st_size / (1024 * 1024), 3)
+    report.update(size_report)
 
     # Create compressed zip next to the STL.
     # This does not change geometry at all.
@@ -165,7 +193,6 @@ def export_mesh(
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             zf.write(path, arcname=path.name)
         report["zip_file"] = str(zip_path)
-        report["stl_size_mb"] = round(path.stat().st_size / (1024 * 1024), 3)
         report["zip_size_mb"] = round(zip_path.stat().st_size / (1024 * 1024), 3)
 
     return report
@@ -288,7 +315,7 @@ def _tpms_family_to_mesh(
     level_high: float | None = None,
     iso: float = 0.0,
     half_thickness: float = 0.15,
-    resolution_per_cell: int = 40,
+    resolution_per_cell: int = 30,
 ) -> trimesh.Trimesh:
     nx = max(30, int(cells[0] * resolution_per_cell) + 1)
     ny = max(30, int(cells[1] * resolution_per_cell) + 1)
@@ -403,7 +430,7 @@ def tpms_to_mesh(*args, **kwargs) -> trimesh.Trimesh:
         level_high=kwargs.pop("level_high", None),
         iso=kwargs.pop("iso", 0.0),
         half_thickness=kwargs.pop("half_thickness", 0.15),
-        resolution_per_cell=kwargs.pop("resolution_per_cell", 40),
+        resolution_per_cell=kwargs.pop("resolution_per_cell", 30),
     )
 
 
@@ -433,7 +460,7 @@ def crop_relative(img, crop_box_rel: Sequence[float]):
 def image_to_binary_mask(
     img,
     solid_is_dark: bool = True,
-    max_pixels: int = 1600,
+    max_pixels: int = 650,
     min_object_size: int = 80,
 ) -> np.ndarray:
     if cv2 is None:
@@ -469,7 +496,7 @@ def extrude_mask_to_mesh(
     width_mm: float,
     height_mm: float,
     depth_mm: float,
-    z_layers: int = 32,
+    z_layers: int = 16,
 ) -> trimesh.Trimesh:
     mask_xy = mask.T
     nx, ny = mask_xy.shape

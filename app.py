@@ -10,12 +10,47 @@ import plotly.graph_objects as go
 import streamlit as st
 import trimesh
 
-from paper_to_stl import load_local_env, run_pipeline
+from paper_to_stl import (
+    DEFAULT_DPI,
+    DEFAULT_MAX_EXPORT_FACES,
+    DEFAULT_MAX_GRID,
+    DEFAULT_MAX_TRACE_PIXELS,
+    DEFAULT_RESOLUTION_PER_CELL,
+    DEFAULT_Z_LAYERS,
+    load_local_env,
+    run_pipeline,
+)
 
 
 APP_DIR = Path(__file__).resolve().parent
 RUNS_DIR = APP_DIR / "structure_finder_runs"
-MAX_PREVIEW_FACES = 80_000
+MAX_PREVIEW_FACES = 120_000
+MESH_PROFILES = {
+    "Balanced": {
+        "resolution_per_cell": DEFAULT_RESOLUTION_PER_CELL,
+        "max_grid": DEFAULT_MAX_GRID,
+        "dpi": DEFAULT_DPI,
+        "max_trace_pixels": DEFAULT_MAX_TRACE_PIXELS,
+        "z_layers": DEFAULT_Z_LAYERS,
+        "max_export_faces": DEFAULT_MAX_EXPORT_FACES,
+    },
+    "Compact": {
+        "resolution_per_cell": 18,
+        "max_grid": 120,
+        "dpi": 320,
+        "max_trace_pixels": 450,
+        "z_layers": 10,
+        "max_export_faces": 500_000,
+    },
+    "Fine": {
+        "resolution_per_cell": 30,
+        "max_grid": 180,
+        "dpi": 500,
+        "max_trace_pixels": 900,
+        "z_layers": 24,
+        "max_export_faces": 1_200_000,
+    },
+}
 
 
 def mesh_dimensions(stl_path: Path) -> tuple[trimesh.Trimesh, np.ndarray, np.ndarray, np.ndarray]:
@@ -50,17 +85,20 @@ def sampled_preview_mesh(mesh: trimesh.Trimesh, max_faces: int = MAX_PREVIEW_FAC
             "method": "full_mesh",
         }
 
+    decimation_error = "quadric decimation returned no faces"
     try:
         simplified = mesh.simplify_quadric_decimation(face_count=max_faces, aggression=5)
         if len(simplified.faces) > 0 and len(simplified.vertices) > 0:
+            simplified.remove_unreferenced_vertices()
             return simplified, {
                 "preview_faces": int(len(simplified.faces)),
                 "original_faces": face_count,
                 "simplified": True,
                 "method": "quadric_decimation",
+                "warning": "",
             }
-    except Exception:
-        pass
+    except Exception as exc:
+        decimation_error = str(exc)
 
     rng = np.random.default_rng(0)
     selected = np.sort(rng.choice(face_count, size=max_faces, replace=False))
@@ -76,6 +114,10 @@ def sampled_preview_mesh(mesh: trimesh.Trimesh, max_faces: int = MAX_PREVIEW_FAC
         "original_faces": face_count,
         "simplified": True,
         "method": "deterministic_face_sampling",
+        "warning": (
+            "Preview decimation backend is unavailable, so this is a sampled fallback. "
+            f"Install fast-simplification for a cleaner continuous preview. Error: {decimation_error}"
+        ),
     }
 
 
@@ -228,6 +270,33 @@ def main() -> None:
         reasoning_effort = st.selectbox("Reasoning effort", ["none", "low", "medium", "high"], index=3)
         max_repairs = st.number_input("Repair attempts", min_value=0, max_value=5, value=2, step=1)
         timeout_s = st.number_input("Builder timeout seconds", min_value=30, max_value=1800, value=300, step=30)
+        with st.expander("Mesh size and quality", expanded=False):
+            profile_name = st.selectbox("Output profile", list(MESH_PROFILES), index=0)
+            profile = MESH_PROFILES[profile_name]
+            resolution_per_cell = st.slider(
+                "TPMS resolution per cell",
+                min_value=12,
+                max_value=40,
+                value=profile["resolution_per_cell"],
+                step=2,
+            )
+            max_grid = st.slider("Maximum TPMS grid per axis", 80, 240, profile["max_grid"], step=10)
+            dpi = st.slider("PDF render DPI", 250, 600, profile["dpi"], step=25)
+            max_trace_pixels = st.slider(
+                "Image-trace max pixels",
+                min_value=300,
+                max_value=1000,
+                value=profile["max_trace_pixels"],
+                step=50,
+            )
+            z_layers = st.slider("Extrusion z layers", 6, 30, profile["z_layers"], step=2)
+            max_export_faces = st.number_input(
+                "Max exported STL faces",
+                min_value=200_000,
+                max_value=2_000_000,
+                value=profile["max_export_faces"],
+                step=100_000,
+            )
         run = st.button("Generate STL", type="primary", use_container_width=True)
 
     if "last_run_dir" not in st.session_state:
@@ -263,6 +332,12 @@ def main() -> None:
                     out_dir=out_dir,
                     model=model.strip() or "gpt-5.5",
                     reasoning_effort=reasoning_effort,
+                    resolution_per_cell=int(resolution_per_cell),
+                    max_grid=int(max_grid),
+                    dpi=int(dpi),
+                    max_trace_pixels=int(max_trace_pixels),
+                    z_layers=int(z_layers),
+                    max_export_faces=int(max_export_faces),
                     max_repairs=int(max_repairs),
                     timeout_s=int(timeout_s),
                     progress=progress,
@@ -355,6 +430,8 @@ def main() -> None:
                 f"Preview reduced from {preview_info['original_faces']:,} to "
                 f"{preview_info['preview_faces']:,} faces. The downloaded STL is unchanged."
             )
+        if preview_info.get("warning"):
+            st.warning(preview_info["warning"])
         st.plotly_chart(fig, use_container_width=True)
 
 

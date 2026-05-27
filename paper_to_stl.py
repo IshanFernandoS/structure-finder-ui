@@ -78,6 +78,12 @@ except Exception:
 DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_REASONING_EFFORT = "high"
 MODEL_FALLBACKS = ["gpt-5.2", "gpt-5.1", "gpt-5", "gpt-4.1"]
+DEFAULT_RESOLUTION_PER_CELL = 24
+DEFAULT_MAX_GRID = 150
+DEFAULT_DPI = 400
+DEFAULT_MAX_TRACE_PIXELS = 650
+DEFAULT_Z_LAYERS = 16
+DEFAULT_MAX_EXPORT_FACES = 800_000
 
 SYSTEM_PROMPT = """
 You are an expert metamaterial-geometry reconstruction assistant.
@@ -196,8 +202,9 @@ Rules:
 - Use actual solid printable geometry: no zero-thickness curves.
 - Preserve intentional metamaterial pores/voids.
 - Generate final-quality meshes, not coarse previews. For implicit or voxel geometry, use high enough sampling to avoid visibly blocky surfaces.
+- Keep exported STL files browser- and download-friendly. Target no more than about 800,000 triangles per STL unless the paper explicitly needs finer resolution.
 - Smooth only faceted marching-cubes or image-traced surfaces when the paper structure is smooth/curved, using light smoothing that preserves the bounding box and pore topology.
-- Use helper functions from geometry_helpers.py when useful. Use export_mesh(..., smooth_iterations=0) by default; pass a small value only for smooth curved voxel/implicit outputs and report it in metadata.
+- Use helper functions from geometry_helpers.py when useful. Use export_mesh(..., smooth_iterations=0, max_faces=800000) by default; pass a small smoothing value only for smooth curved voxel/implicit outputs and report it in metadata.
 - For filled implicit solids, use scalar_field_to_mesh(...). For TPMS/shell-type level sets, use scalar_shell_to_mesh(...).
 - Do not access the internet.
 Return only JSON with key builder_code.
@@ -921,6 +928,31 @@ def smooth_mesh(mesh: Any, iterations: int = 4, preserve_bounds: bool = True) ->
     return smoothed
 
 
+def simplify_mesh_for_export(mesh: Any, max_faces: Optional[int]) -> Tuple[Any, Dict[str, Any]]:
+    """Reduce very large meshes so STL files stay practical for browser use."""
+    original_faces = int(len(mesh.faces))
+    report = {
+        "original_faces_before_export_cap": original_faces,
+        "max_export_faces": int(max_faces) if max_faces else None,
+        "decimated_for_size": False,
+        "decimation_error": "",
+    }
+    if not max_faces or original_faces <= max_faces:
+        return mesh, report
+
+    try:
+        reduced = mesh.simplify_quadric_decimation(face_count=int(max_faces), aggression=7)
+        if len(reduced.faces) > 0 and len(reduced.vertices) > 0:
+            _clean_mesh_faces(reduced)
+            reduced.fix_normals()
+            report["decimated_for_size"] = True
+            return reduced, report
+    except Exception as exc:
+        report["decimation_error"] = str(exc)
+
+    return mesh, report
+
+
 def fit_mesh_to_bounds(mesh: Any, size: Tuple[float, float, float], origin=(0.0, 0.0, 0.0)) -> Any:
     target_size = np.asarray(size, dtype=float)
     target_origin = np.asarray(origin, dtype=float)
@@ -931,11 +963,17 @@ def fit_mesh_to_bounds(mesh: Any, size: Tuple[float, float, float], origin=(0.0,
     return mesh
 
 
-def export_validated_mesh(mesh: Any, out_stl: Path, smooth_iterations: int = 0) -> Dict[str, Any]:
+def export_validated_mesh(
+    mesh: Any,
+    out_stl: Path,
+    smooth_iterations: int = 0,
+    max_faces: Optional[int] = DEFAULT_MAX_EXPORT_FACES,
+) -> Dict[str, Any]:
     require_mesh_packages()
     out_stl.parent.mkdir(parents=True, exist_ok=True)
     _clean_mesh_faces(mesh)
     trimesh.repair.fix_normals(mesh)
+    mesh, size_report = simplify_mesh_for_export(mesh, max_faces)
     if smooth_iterations > 0:
         mesh = smooth_mesh(mesh, iterations=smooth_iterations)
     if not mesh.is_watertight:
@@ -951,7 +989,7 @@ def export_validated_mesh(mesh: Any, out_stl: Path, smooth_iterations: int = 0) 
         components = len(loaded.split(only_watertight=False))
     except Exception:
         components = -1
-    return {
+    report = {
         "file": str(out_stl),
         "vertices": int(len(loaded.vertices)),
         "faces": int(len(loaded.faces)),
@@ -959,10 +997,31 @@ def export_validated_mesh(mesh: Any, out_stl: Path, smooth_iterations: int = 0) 
         "watertight": bool(loaded.is_watertight),
         "connected_components": int(components),
         "smoothing_iterations": int(smooth_iterations),
+        "stl_size_mb": round(out_stl.stat().st_size / (1024 * 1024), 3),
     }
+    report.update(size_report)
+    return report
 
 
-def generate_tpms_local(structure: Dict[str, Any], out_dir: Path, resolution_per_cell: int, max_grid: int) -> Optional[Path]:
+def postprocess_stl_file(stl_path: Path, max_faces: Optional[int] = DEFAULT_MAX_EXPORT_FACES) -> Dict[str, Any]:
+    require_mesh_packages()
+    mesh = trimesh.load_mesh(stl_path, force="mesh")
+    if not max_faces or len(mesh.faces) <= max_faces:
+        stats = export_validated_mesh(mesh, stl_path, smooth_iterations=0, max_faces=None)
+        stats["postprocessed_for_size"] = False
+        return stats
+    stats = export_validated_mesh(mesh, stl_path, smooth_iterations=0, max_faces=max_faces)
+    stats["postprocessed_for_size"] = True
+    return stats
+
+
+def generate_tpms_local(
+    structure: Dict[str, Any],
+    out_dir: Path,
+    resolution_per_cell: int,
+    max_grid: int,
+    max_export_faces: Optional[int],
+) -> Optional[Path]:
     tp = structure["tpms_parameters"]
     family = tp.get("family", "unknown")
     if family in {"unknown", "custom"} or tp.get("requires_mapping"):
@@ -1026,7 +1085,7 @@ def generate_tpms_local(structure: Dict[str, Any], out_dir: Path, resolution_per
     if structure["reconstruction_level"] != "exact_from_equation":
         name += "_approximate"
     out_stl = out_dir / "stl" / f"{name}.stl"
-    stats = export_validated_mesh(mesh, out_stl, smooth_iterations=4)
+    stats = export_validated_mesh(mesh, out_stl, smooth_iterations=3, max_faces=max_export_faces)
 
     metadata = {
         "structure_name": structure["name"],
@@ -1118,6 +1177,7 @@ def generate_image_trace_local(
     width_override: Optional[float],
     height_override: Optional[float],
     depth_override: Optional[float],
+    max_export_faces: Optional[int],
 ) -> Optional[Path]:
     fig = structure["figure_trace_info"]
     if not fig.get("needs_figure_tracing", False) and trace_page_override is None:
@@ -1154,7 +1214,7 @@ def generate_image_trace_local(
     if structure["reconstruction_level"] != "exact_from_equation":
         name += "_approximate"
     out_stl = out_dir / "stl" / f"{name}.stl"
-    stats = export_validated_mesh(mesh, out_stl, smooth_iterations=3)
+    stats = export_validated_mesh(mesh, out_stl, smooth_iterations=2, max_faces=max_export_faces)
 
     metadata = {
         "structure_name": structure["name"],
@@ -1190,7 +1250,13 @@ def run_local_generators(
             continue
         try:
             if gen == "tpms_implicit":
-                stl = generate_tpms_local(structure, out_dir, args.resolution_per_cell, args.max_grid)
+                stl = generate_tpms_local(
+                    structure,
+                    out_dir,
+                    args.resolution_per_cell,
+                    args.max_grid,
+                    args.max_export_faces,
+                )
                 if stl:
                     generated.append(stl)
                     messages.append(f"[OK] Local TPMS generated: {stl.name}")
@@ -1209,6 +1275,7 @@ def run_local_generators(
                     width_override=args.width_mm,
                     height_override=args.height_mm,
                     depth_override=args.depth_mm,
+                    max_export_faces=args.max_export_faces,
                 )
                 if stl:
                     generated.append(stl)
@@ -1287,6 +1354,7 @@ def run_builder_script(
     pdf_path: Path,
     out_dir: Path,
     timeout_s: int,
+    max_export_faces: Optional[int],
 ) -> Tuple[bool, str, List[Path]]:
     builder_path = builder_path.resolve()
     pdf_path = pdf_path.resolve()
@@ -1319,6 +1387,13 @@ def run_builder_script(
     stls = list((builder_out / "stl").glob("*.stl")) if (builder_out / "stl").exists() else []
     success = success_code and len(stls) > 0
 
+    postprocess_reports: Dict[str, Any] = {}
+    for stl in stls:
+        try:
+            postprocess_reports[stl.name] = postprocess_stl_file(stl, max_faces=max_export_faces)
+        except Exception as exc:
+            postprocess_reports[stl.name] = {"error": str(exc)}
+
     if stls:
         for sub in ["stl", "metadata", "preview"]:
             src = builder_out / sub
@@ -1335,6 +1410,9 @@ def run_builder_script(
     if (builder_out / "generation_report.md").exists():
         shutil.copy2(builder_out / "generation_report.md", out_dir / "custom_generation_report.md")
 
+    if postprocess_reports:
+        write_json(out_dir / "custom_builder_stl_postprocess.json", postprocess_reports)
+
     return success, log, stls
 
 
@@ -1347,6 +1425,7 @@ def run_custom_builder_loop(
     reasoning_effort: str,
     max_repairs: int,
     timeout_s: int,
+    max_export_faces: Optional[int],
     progress: Optional[Callable[[str], None]] = None,
 ) -> Tuple[List[Path], List[str]]:
     generated: List[Path] = []
@@ -1373,7 +1452,7 @@ def run_custom_builder_loop(
         builder_path.write_text(code, encoding="utf-8")
 
         emit(progress, f"[INFO] Running custom builder attempt {attempt}...")
-        success, log, stls = run_builder_script(builder_path, pdf_path, out_dir, timeout_s)
+        success, log, stls = run_builder_script(builder_path, pdf_path, out_dir, timeout_s, max_export_faces)
         (out_dir / f"custom_builder_log_attempt_{attempt}.txt").write_text(log, encoding="utf-8")
 
         if success:
@@ -1461,6 +1540,9 @@ def zip_output(out_dir: Path) -> Path:
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
         for p in out_dir.rglob("*"):
             if p.is_file() and p.name != zip_path.name:
+                rel = p.relative_to(out_dir)
+                if "custom_builder_output" in rel.parts and "stl" in rel.parts:
+                    continue
                 z.write(p, arcname=p.relative_to(out_dir))
     return zip_path
 
@@ -1476,17 +1558,18 @@ def run_pipeline(
     prompt_file: Optional[Path] = None,
     plan_json: Optional[Path] = None,
     force_custom_builder: bool = False,
-    resolution_per_cell: int = 30,
-    max_grid: int = 180,
+    resolution_per_cell: int = DEFAULT_RESOLUTION_PER_CELL,
+    max_grid: int = DEFAULT_MAX_GRID,
     trace_page: Optional[int] = None,
     crop: Optional[List[float]] = None,
     width_mm: Optional[float] = None,
     height_mm: Optional[float] = None,
     depth_mm: Optional[float] = None,
-    dpi: int = 500,
-    max_trace_pixels: int = 900,
-    z_layers: int = 30,
+    dpi: int = DEFAULT_DPI,
+    max_trace_pixels: int = DEFAULT_MAX_TRACE_PIXELS,
+    z_layers: int = DEFAULT_Z_LAYERS,
     min_object_pixels: int = 80,
+    max_export_faces: Optional[int] = DEFAULT_MAX_EXPORT_FACES,
     save_debug: bool = False,
     max_repairs: int = 2,
     timeout_s: int = 300,
@@ -1534,6 +1617,7 @@ def run_pipeline(
         max_trace_pixels=max_trace_pixels,
         z_layers=z_layers,
         min_object_pixels=min_object_pixels,
+        max_export_faces=max_export_faces,
         save_debug=save_debug,
     )
     local_generated, local_messages = run_local_generators(pdf_path, plan, out_dir, args)
@@ -1552,6 +1636,7 @@ def run_pipeline(
                 reasoning_effort=reasoning_effort,
                 max_repairs=max_repairs,
                 timeout_s=timeout_s,
+                max_export_faces=max_export_faces,
                 progress=progress,
             )
 
@@ -1577,17 +1662,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompt-file", type=Path, default=None, help="Optional custom extraction prompt file.")
     parser.add_argument("--plan-json", type=Path, default=None, help="Reuse an existing reconstruction_plan.json.")
     parser.add_argument("--force-custom-builder", action="store_true", help="Always ask GPT to write a custom builder.")
-    parser.add_argument("--resolution-per-cell", type=int, default=30)
-    parser.add_argument("--max-grid", type=int, default=180)
+    parser.add_argument("--resolution-per-cell", type=int, default=DEFAULT_RESOLUTION_PER_CELL)
+    parser.add_argument("--max-grid", type=int, default=DEFAULT_MAX_GRID)
     parser.add_argument("--trace-page", type=int, default=None)
     parser.add_argument("--crop", nargs=4, type=float, default=None, help="Relative crop x0 y0 x1 y1")
     parser.add_argument("--width-mm", type=float, default=None)
     parser.add_argument("--height-mm", type=float, default=None)
     parser.add_argument("--depth-mm", type=float, default=None)
-    parser.add_argument("--dpi", type=int, default=500)
-    parser.add_argument("--max-trace-pixels", type=int, default=900)
-    parser.add_argument("--z-layers", type=int, default=30)
+    parser.add_argument("--dpi", type=int, default=DEFAULT_DPI)
+    parser.add_argument("--max-trace-pixels", type=int, default=DEFAULT_MAX_TRACE_PIXELS)
+    parser.add_argument("--z-layers", type=int, default=DEFAULT_Z_LAYERS)
     parser.add_argument("--min-object-pixels", type=int, default=80)
+    parser.add_argument("--max-export-faces", type=int, default=DEFAULT_MAX_EXPORT_FACES)
     parser.add_argument("--save-debug", action="store_true")
     parser.add_argument("--max-repairs", type=int, default=2)
     parser.add_argument("--timeout-s", type=int, default=300)
@@ -1617,6 +1703,7 @@ def main() -> None:
         max_trace_pixels=args.max_trace_pixels,
         z_layers=args.z_layers,
         min_object_pixels=args.min_object_pixels,
+        max_export_faces=args.max_export_faces,
         save_debug=args.save_debug,
         max_repairs=args.max_repairs,
         timeout_s=args.timeout_s,
