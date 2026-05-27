@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import traceback
 import uuid
 from pathlib import Path
 
@@ -252,6 +253,7 @@ def main() -> None:
 
         def progress(message: str) -> None:
             messages.append(message)
+            print(message, flush=True)
             st.write(message)
 
         with st.status("Running Structure Finder...", expanded=True) as status:
@@ -273,11 +275,13 @@ def main() -> None:
                 st.write(f"Bundle: {bundle}")
             except Exception as exc:
                 error_log = out_dir / "app_error.txt"
-                import traceback
-
-                error_log.write_text(traceback.format_exc(), encoding="utf-8")
+                traceback_text = traceback.format_exc()
+                error_log.write_text(traceback_text, encoding="utf-8")
+                print(traceback_text, flush=True)
                 status.update(label="Failed", state="error")
                 st.error(str(exc))
+                with st.expander("Full error traceback", expanded=True):
+                    st.code(traceback_text, language="text")
                 st.caption(f"Full error log: {error_log}")
                 return
 
