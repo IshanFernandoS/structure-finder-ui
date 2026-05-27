@@ -1,3 +1,13 @@
+---
+title: Structure Finder
+emoji: 🔬
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 8501
+pinned: false
+---
+
 # Structure Finder
 
 Structure Finder is a universal AI-assisted paper-to-STL pipeline for metamaterial papers. It extracts a reconstruction plan from the PDF, uses local generators where they are reliable, and asks GPT to write a paper-specific builder for structures that need custom code. If that builder fails, the error log is sent back to GPT for repair.
