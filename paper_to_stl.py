@@ -72,7 +72,7 @@ except Exception:
     trimesh = None
 
 
-DEFAULT_MODEL = "gpt-5"
+DEFAULT_MODEL = "gpt-5.2"
 DEFAULT_REASONING_EFFORT = "high"
 
 SYSTEM_PROMPT = """

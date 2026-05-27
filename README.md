@@ -59,13 +59,13 @@ Security note: this app can ask GPT to generate Python builder code and run it l
 ## CLI
 
 ```powershell
-.\.venv\Scripts\python.exe paper_to_stl.py paper.pdf --out output --model gpt-5 --reasoning-effort high
+.\.venv\Scripts\python.exe paper_to_stl.py paper.pdf --out output --model gpt-5.2 --reasoning-effort high
 ```
 
 With a hidden API-key prompt:
 
 ```powershell
-.\.venv\Scripts\python.exe paper_to_stl.py paper.pdf --out output --ask-api-key --model gpt-5 --reasoning-effort high
+.\.venv\Scripts\python.exe paper_to_stl.py paper.pdf --out output --ask-api-key --model gpt-5.2 --reasoning-effort high
 ```
 
 Outputs include:
