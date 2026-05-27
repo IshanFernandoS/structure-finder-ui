@@ -72,8 +72,9 @@ except Exception:
     trimesh = None
 
 
-DEFAULT_MODEL = "gpt-5.2"
+DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_REASONING_EFFORT = "high"
+MODEL_FALLBACKS = ["gpt-5.2", "gpt-5.1", "gpt-5", "gpt-4.1"]
 
 SYSTEM_PROMPT = """
 You are an expert metamaterial-geometry reconstruction assistant.
@@ -617,34 +618,74 @@ def call_responses_json(
     schema: Dict[str, Any],
     schema_name: str,
     reasoning_effort: Optional[str] = None,
+    progress: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
-    request_args: Dict[str, Any] = {
-        "model": model,
-        "input": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ],
-        "text": {
-            "format": {
-                "type": "json_schema",
-                "name": schema_name,
-                "strict": True,
-                "schema": schema,
-            }
-        },
-    }
-    if reasoning_effort and reasoning_effort not in {"none", "auto"}:
-        request_args["reasoning"] = {"effort": reasoning_effort}
+    candidates = [model.strip() or DEFAULT_MODEL]
+    for fallback in MODEL_FALLBACKS:
+        if fallback not in candidates:
+            candidates.append(fallback)
 
-    try:
-        response = client.responses.create(**request_args)
-    except Exception:
-        if "reasoning" in request_args:
-            request_args.pop("reasoning", None)
+    last_error: Optional[Exception] = None
+    for candidate in candidates:
+        request_args: Dict[str, Any] = {
+            "model": candidate,
+            "input": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": schema_name,
+                    "strict": True,
+                    "schema": schema,
+                }
+            },
+        }
+        if reasoning_effort and reasoning_effort not in {"none", "auto"}:
+            request_args["reasoning"] = {"effort": reasoning_effort}
+
+        try:
+            emit(progress, f"[INFO] Calling OpenAI model: {candidate}")
             response = client.responses.create(**request_args)
-        else:
-            raise
-    return json.loads(response.output_text)
+            data = json.loads(response.output_text)
+            data["_model_used"] = candidate
+            return data
+        except Exception as exc:
+            last_error = exc
+            if "reasoning" in request_args:
+                try:
+                    request_args.pop("reasoning", None)
+                    emit(progress, f"[WARN] Retrying {candidate} without reasoning effort.")
+                    response = client.responses.create(**request_args)
+                    data = json.loads(response.output_text)
+                    data["_model_used"] = candidate
+                    data["_reasoning_fallback_used"] = True
+                    return data
+                except Exception as retry_exc:
+                    last_error = retry_exc
+
+            message = str(last_error).lower()
+            model_related = any(
+                token in message
+                for token in [
+                    "model",
+                    "does not exist",
+                    "not found",
+                    "unsupported",
+                    "invalid",
+                    "access",
+                    "permission",
+                ]
+            )
+            if candidate != candidates[-1] and model_related:
+                emit(progress, f"[WARN] Model {candidate} failed; trying fallback model.")
+                continue
+            raise last_error
+
+    if last_error:
+        raise last_error
+    raise RuntimeError("OpenAI request failed before any model was attempted.")
 
 
 def upload_file(client: Any, path: Path, purpose: str = "user_data") -> Any:
@@ -680,6 +721,7 @@ def extract_reconstruction_plan(
         schema=DESIGN_SCHEMA,
         schema_name="metamaterial_reconstruction_plan",
         reasoning_effort=reasoning_effort,
+        progress=progress,
     )
     write_json(out_dir / "reconstruction_plan.json", plan)
     return plan
@@ -1103,6 +1145,7 @@ def call_custom_builder_model(
         schema=CUSTOM_BUILDER_SCHEMA,
         schema_name="paper_specific_stl_builder",
         reasoning_effort=reasoning_effort,
+        progress=progress,
     )
     return result["builder_code"]
 

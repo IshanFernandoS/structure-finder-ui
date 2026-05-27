@@ -223,7 +223,7 @@ def main() -> None:
     with st.sidebar:
         st.header("Input")
         uploaded_pdf = st.file_uploader("Paper PDF", type=["pdf"])
-        model = st.text_input("OpenAI model", value="gpt-5.2")
+        model = st.text_input("OpenAI model", value="gpt-5.5")
         reasoning_effort = st.selectbox("Reasoning effort", ["none", "low", "medium", "high"], index=3)
         max_repairs = st.number_input("Repair attempts", min_value=0, max_value=5, value=2, step=1)
         timeout_s = st.number_input("Builder timeout seconds", min_value=30, max_value=1800, value=300, step=30)
@@ -259,7 +259,7 @@ def main() -> None:
                 success, bundle = run_pipeline(
                     pdf_path=pdf_path,
                     out_dir=out_dir,
-                    model=model.strip() or "gpt-5.2",
+                    model=model.strip() or "gpt-5.5",
                     reasoning_effort=reasoning_effort,
                     max_repairs=int(max_repairs),
                     timeout_s=int(timeout_s),
