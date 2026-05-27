@@ -48,6 +48,8 @@ except Exception:
 
 try:
     import fitz  # PyMuPDF
+    fitz.TOOLS.mupdf_display_errors(False)
+    fitz.TOOLS.mupdf_display_warnings(False)
 except Exception:
     fitz = None
 
@@ -1054,6 +1056,26 @@ def render_pdf_page(pdf_path: Path, page_number: int, dpi: int):
     return img
 
 
+def remove_small_objects_compat(mask: np.ndarray, threshold: int) -> np.ndarray:
+    try:
+        return morphology.remove_small_objects(mask, max_size=threshold)
+    except TypeError:
+        return morphology.remove_small_objects(mask, min_size=threshold)
+
+
+def remove_small_holes_compat(mask: np.ndarray, threshold: int) -> np.ndarray:
+    try:
+        return morphology.remove_small_holes(mask, max_size=threshold)
+    except TypeError:
+        return morphology.remove_small_holes(mask, area_threshold=threshold)
+
+
+def binary_closing_compat(mask: np.ndarray, footprint: Any) -> np.ndarray:
+    if hasattr(morphology, "closing"):
+        return morphology.closing(mask, footprint)
+    return morphology.binary_closing(mask, footprint)
+
+
 def crop_relative(img: Any, box: List[float]):
     w, h = img.size
     x0, y0, x1, y1 = [max(0.0, min(1.0, float(v))) for v in box]
@@ -1076,9 +1098,9 @@ def image_to_mask(img: Any, solid_is_dark: bool, max_pixels: int, min_object_pix
     blur = cv2.GaussianBlur(gray, (3, 3), 0)
     _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     mask = th == 0 if solid_is_dark else th == 255
-    mask = morphology.remove_small_objects(mask.astype(bool), min_size=max(1, min_object_pixels))
-    mask = morphology.remove_small_holes(mask.astype(bool), area_threshold=max(1, min_object_pixels))
-    mask = morphology.binary_closing(mask, morphology.disk(1))
+    mask = remove_small_objects_compat(mask.astype(bool), max(1, min_object_pixels))
+    mask = remove_small_holes_compat(mask.astype(bool), max(1, min_object_pixels))
+    mask = binary_closing_compat(mask, morphology.disk(1))
     return mask.astype(bool)
 
 

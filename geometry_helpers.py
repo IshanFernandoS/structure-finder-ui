@@ -23,6 +23,8 @@ try:
     import cv2
     import fitz
     from PIL import Image
+    fitz.TOOLS.mupdf_display_errors(False)
+    fitz.TOOLS.mupdf_display_warnings(False)
 except Exception:
     cv2 = None
     fitz = None
@@ -447,9 +449,18 @@ def image_to_binary_mask(
     _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     mask = th == 0 if solid_is_dark else th == 255
 
-    mask = morphology.remove_small_objects(mask.astype(bool), min_size=min_object_size)
-    mask = morphology.remove_small_holes(mask.astype(bool), area_threshold=min_object_size)
-    mask = morphology.binary_closing(mask, morphology.disk(1))
+    try:
+        mask = morphology.remove_small_objects(mask.astype(bool), max_size=min_object_size)
+    except TypeError:
+        mask = morphology.remove_small_objects(mask.astype(bool), min_size=min_object_size)
+    try:
+        mask = morphology.remove_small_holes(mask.astype(bool), max_size=min_object_size)
+    except TypeError:
+        mask = morphology.remove_small_holes(mask.astype(bool), area_threshold=min_object_size)
+    if hasattr(morphology, "closing"):
+        mask = morphology.closing(mask, morphology.disk(1))
+    else:
+        mask = morphology.binary_closing(mask, morphology.disk(1))
     return mask.astype(bool)
 
 
