@@ -85,6 +85,82 @@ DEFAULT_MAX_TRACE_PIXELS = 650
 DEFAULT_Z_LAYERS = 16
 DEFAULT_MAX_EXPORT_FACES = 800_000
 IMAGE_SOURCE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
+OPENAI_CONTEXT_FILE_EXTENSIONS = {
+    ".art",
+    ".bat",
+    ".brf",
+    ".c",
+    ".cls",
+    ".css",
+    ".csv",
+    ".diff",
+    ".doc",
+    ".docx",
+    ".dot",
+    ".eml",
+    ".es",
+    ".h",
+    ".hs",
+    ".htm",
+    ".html",
+    ".hwp",
+    ".hwpx",
+    ".ics",
+    ".ifb",
+    ".java",
+    ".js",
+    ".json",
+    ".keynote",
+    ".ksh",
+    ".ltx",
+    ".mail",
+    ".markdown",
+    ".md",
+    ".mht",
+    ".mhtml",
+    ".mjs",
+    ".nws",
+    ".odt",
+    ".pages",
+    ".patch",
+    ".pdf",
+    ".pl",
+    ".pm",
+    ".pot",
+    ".ppa",
+    ".pps",
+    ".ppt",
+    ".pptx",
+    ".pwz",
+    ".py",
+    ".rst",
+    ".rtf",
+    ".scala",
+    ".sh",
+    ".shtml",
+    ".srt",
+    ".sty",
+    ".svg",
+    ".svgz",
+    ".tex",
+    ".text",
+    ".txt",
+    ".tsv",
+    ".vcf",
+    ".vtt",
+    ".wiz",
+    ".xla",
+    ".xlb",
+    ".xlc",
+    ".xlm",
+    ".xls",
+    ".xlsx",
+    ".xlt",
+    ".xlw",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
 
 SYSTEM_PROMPT = """
 You are an expert metamaterial-geometry reconstruction assistant.
@@ -680,6 +756,91 @@ def source_paths_by_name(source_paths: Optional[List[Path]]) -> Dict[str, Path]:
     return out
 
 
+def read_text_source(path: Path) -> str:
+    raw = path.read_bytes()
+    if b"\x00" in raw[:4096]:
+        raise UnicodeDecodeError("binary", raw, 0, 1, "NUL bytes detected")
+
+    for encoding in ("utf-8", "utf-16", "latin-1"):
+        try:
+            text = raw.decode(encoding)
+            if encoding == "latin-1":
+                sample = text[: min(len(text), 10000)]
+                if sample:
+                    printable = sum(1 for ch in sample if ch.isprintable() or ch in "\r\n\t")
+                    if printable / len(sample) < 0.9:
+                        raise UnicodeDecodeError(encoding, raw, 0, 1, "low printable character ratio")
+            return text
+        except UnicodeError:
+            continue
+    raise UnicodeDecodeError("unknown", raw, 0, 1, "source does not look like text")
+
+
+def mesh_source_summary(path: Path) -> str:
+    lines = [
+        f"Original source filename: {path.name}",
+        f"Original extension: {path.suffix.lower()}",
+        f"File size bytes: {path.stat().st_size if path.exists() else 'unknown'}",
+        "",
+    ]
+    try:
+        from geometry_helpers import load_source_geometry_mesh
+
+        mesh = load_source_geometry_mesh(path)
+        lines.extend(
+            [
+                "Parsed geometry summary:",
+                f"- vertices: {len(mesh.vertices)}",
+                f"- faces: {len(mesh.faces)}",
+                f"- extents: {[float(v) for v in mesh.extents]}",
+                f"- bounds_min: {[float(v) for v in mesh.bounds[0]]}",
+                f"- bounds_max: {[float(v) for v in mesh.bounds[1]]}",
+            ]
+        )
+    except Exception as exc:
+        lines.extend(
+            [
+                "The original file could not be parsed into a text/mesh summary for model context.",
+                f"Parse error: {exc}",
+                "The original file is still available to the local custom builder in STRUCTURE_FINDER_SOURCE_DIR.",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def prepare_model_context_sources(source_paths: Optional[List[Path]], out_dir: Path) -> List[Path]:
+    """Create OpenAI-compatible context files while preserving originals locally."""
+    context_dir = out_dir / "model_context_sources"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    context_paths: List[Path] = []
+
+    for path in source_paths or []:
+        p = Path(path)
+        suffix = p.suffix.lower()
+        if suffix in IMAGE_SOURCE_EXTENSIONS or suffix in OPENAI_CONTEXT_FILE_EXTENSIONS:
+            context_paths.append(p)
+            continue
+
+        context_path = unique_path(context_dir, f"{safe_source_filename(p.name)}.txt")
+        try:
+            body = read_text_source(p)
+            body_kind = "Text conversion of unsupported source file extension for OpenAI ingestion."
+        except Exception:
+            body = mesh_source_summary(p)
+            body_kind = "Parsed summary of unsupported binary/mesh source file for OpenAI ingestion."
+
+        header = (
+            f"Original source filename: {p.name}\n"
+            f"Original extension: {suffix}\n"
+            f"{body_kind}\n"
+            "The original file is available locally to generated builders in STRUCTURE_FINDER_SOURCE_DIR.\n\n"
+        )
+        context_path.write_text(header + body, encoding="utf-8", errors="replace")
+        context_paths.append(context_path)
+
+    return context_paths
+
+
 def response_source_item(uploaded_file: Any, path: Path) -> Dict[str, Any]:
     suffix = path.suffix.lower()
     if suffix in IMAGE_SOURCE_EXTENSIONS:
@@ -901,7 +1062,8 @@ def extract_reconstruction_plan(
 
     emit(progress, "[INFO] Uploading PDF and source files for plan extraction...")
     pdf_file = upload_file(client, pdf_path)
-    source_files = [upload_file(client, path) for path in source_paths or []]
+    context_paths = prepare_model_context_sources(source_paths, out_dir)
+    source_files = [upload_file(client, path) for path in context_paths]
 
     manifest = source_manifest(pdf_path, source_paths)
     (out_dir / "source_manifest.txt").write_text(manifest, encoding="utf-8")
@@ -909,13 +1071,14 @@ def extract_reconstruction_plan(
     emit(progress, "[INFO] Extracting reconstruction plan...")
     user_content = [
         response_source_item(pdf_file, pdf_path),
-        *[response_source_item(uploaded, path) for uploaded, path in zip(source_files, source_paths or [])],
+        *[response_source_item(uploaded, path) for uploaded, path in zip(source_files, context_paths)],
         {
             "type": "input_text",
             "text": (
                 f"{prompt}\n\nUploaded source manifest:\n{manifest}\n\n"
                 "Use every uploaded source that contains relevant geometry evidence. "
                 "When citing evidence, include the source filename. "
+                "Some unsupported source extensions may be provided to you as .txt context copies; those copies include the original filename in their header. "
                 "For figure_trace_info.source_filename, use the exact filename from the manifest; use the primary PDF filename if the trace target is in the paper."
             ),
         },
@@ -1462,7 +1625,8 @@ def call_custom_builder_model(
 
     emit(progress, "[INFO] Uploading files for custom builder...")
     pdf_file = upload_file(client, pdf_path)
-    source_files = [upload_file(client, path) for path in source_paths or []]
+    context_paths = prepare_model_context_sources(source_paths, plan_path.parent)
+    source_files = [upload_file(client, path) for path in context_paths]
     plan_file = upload_file(client, plan_path)
     manifest = source_manifest(pdf_path, source_paths)
 
@@ -1471,6 +1635,7 @@ def call_custom_builder_model(
         user_text = REPAIR_BUILDER_PROMPT_TEMPLATE.format(log=repair_log[-12000:], code=previous_code[-24000:])
     user_text = (
         f"{user_text}\n\nUploaded source manifest:\n{manifest}\n\n"
+        "Some unsupported source extensions may be provided to you as .txt context copies; those copies include the original filename in their header. "
         "The generated builder will be run locally with STRUCTURE_FINDER_SOURCE_DIR pointing to a directory containing the supplementary/source files listed above. "
         "The primary PDF is passed via --pdf and also exposed as STRUCTURE_FINDER_PRIMARY_PDF."
     )
@@ -1481,7 +1646,7 @@ def call_custom_builder_model(
         system_prompt=CUSTOM_BUILDER_SYSTEM_PROMPT,
         user_content=[
             response_source_item(pdf_file, pdf_path),
-            *[response_source_item(uploaded, path) for uploaded, path in zip(source_files, source_paths or [])],
+            *[response_source_item(uploaded, path) for uploaded, path in zip(source_files, context_paths)],
             response_source_item(plan_file, plan_path),
             {"type": "input_text", "text": user_text},
         ],
