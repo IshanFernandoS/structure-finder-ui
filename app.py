@@ -51,6 +51,7 @@ SUPPORTING_FILE_TYPES = [
     "bdf",
     "nas",
     "cdb",
+    "fe",
     "fem",
     "unv",
     "stl",
