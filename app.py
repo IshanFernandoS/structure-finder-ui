@@ -25,6 +25,20 @@ from paper_to_stl import (
 APP_DIR = Path(__file__).resolve().parent
 RUNS_DIR = APP_DIR / "structure_finder_runs"
 MAX_PREVIEW_FACES = 120_000
+SUPPORTING_FILE_TYPES = [
+    "pdf",
+    "png",
+    "jpg",
+    "jpeg",
+    "tif",
+    "tiff",
+    "bmp",
+    "webp",
+    "csv",
+    "txt",
+    "md",
+    "json",
+]
 MESH_PROFILES = {
     "Balanced": {
         "resolution_per_cell": DEFAULT_RESOLUTION_PER_CELL,
@@ -256,6 +270,27 @@ def latest_json(path: Path) -> dict | None:
     return json.loads(candidates[-1].read_text(encoding="utf-8"))
 
 
+def safe_upload_name(name: str) -> str:
+    path = Path(name)
+    stem = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in path.stem.strip())
+    stem = "_".join(part for part in stem.split("_") if part) or "source"
+    return f"{stem[:100]}{path.suffix.lower()}"
+
+
+def unique_upload_path(directory: Path, filename: str) -> Path:
+    candidate = directory / filename
+    if not candidate.exists():
+        return candidate
+    stem = candidate.stem
+    suffix = candidate.suffix
+    index = 2
+    while True:
+        candidate = directory / f"{stem}_{index}{suffix}"
+        if not candidate.exists():
+            return candidate
+        index += 1
+
+
 def main() -> None:
     st.set_page_config(page_title="Structure Finder", page_icon="STL", layout="wide")
     load_local_env(APP_DIR / ".env")
@@ -266,6 +301,12 @@ def main() -> None:
     with st.sidebar:
         st.header("Input")
         uploaded_pdf = st.file_uploader("Paper PDF", type=["pdf"])
+        supporting_files = st.file_uploader(
+            "Supplementary/source files",
+            type=SUPPORTING_FILE_TYPES,
+            accept_multiple_files=True,
+            help="Upload SI PDFs, figures, tables, text notes, or data files that contain geometry evidence.",
+        )
         model = st.text_input("OpenAI model", value="gpt-5.5")
         reasoning_effort = st.selectbox("Reasoning effort", ["none", "low", "medium", "high"], index=3)
         max_repairs = st.number_input("Repair attempts", min_value=0, max_value=5, value=2, step=1)
@@ -303,8 +344,8 @@ def main() -> None:
         st.session_state.last_run_dir = None
 
     st.caption(
-        "The pipeline extracts a reconstruction plan, uses local generators where appropriate, asks GPT for custom builders "
-        "when needed, repairs failures, then previews any STL files produced."
+        "The pipeline extracts a reconstruction plan from the primary paper and any supplementary/source files, uses local "
+        "generators where appropriate, asks GPT for custom builders when needed, repairs failures, then previews any STL files produced."
     )
 
     if uploaded_pdf is None:
@@ -317,6 +358,14 @@ def main() -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
         pdf_path = out_dir / uploaded_pdf.name
         pdf_path.write_bytes(uploaded_pdf.getvalue())
+        source_paths: list[Path] = []
+        if supporting_files:
+            source_dir = out_dir / "source_files"
+            source_dir.mkdir(parents=True, exist_ok=True)
+            for uploaded_source in supporting_files:
+                source_path = unique_upload_path(source_dir, safe_upload_name(uploaded_source.name))
+                source_path.write_bytes(uploaded_source.getvalue())
+                source_paths.append(source_path)
 
         messages: list[str] = []
 
@@ -330,6 +379,7 @@ def main() -> None:
                 success, bundle = run_pipeline(
                     pdf_path=pdf_path,
                     out_dir=out_dir,
+                    source_paths=source_paths,
                     model=model.strip() or "gpt-5.5",
                     reasoning_effort=reasoning_effort,
                     resolution_per_cell=int(resolution_per_cell),

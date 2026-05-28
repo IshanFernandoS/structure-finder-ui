@@ -84,20 +84,22 @@ DEFAULT_DPI = 400
 DEFAULT_MAX_TRACE_PIXELS = 650
 DEFAULT_Z_LAYERS = 16
 DEFAULT_MAX_EXPORT_FACES = 800_000
+IMAGE_SOURCE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
 
 SYSTEM_PROMPT = """
 You are an expert metamaterial-geometry reconstruction assistant.
 
-Your task is to read the uploaded scientific paper and extract all information needed to regenerate the reported metamaterial structures as STL files.
+Your task is to read the uploaded scientific paper and any uploaded supplementary/source files, then extract all information needed to regenerate the reported metamaterial structures as STL files.
 
-Use only evidence from the paper:
+Use only evidence from the uploaded sources:
 - text,
 - equations,
 - parameter tables,
 - figure captions,
 - labelled dimensions,
 - visible figures,
-- supplementary material if included in the PDF.
+- supplementary material,
+- uploaded figures/tables/data files.
 
 Do not hallucinate missing CAD details.
 
@@ -111,6 +113,7 @@ For every important design rule or parameter, provide a source reference such as
 - Eq. 1,
 - Table 1,
 - Fig. 3(a),
+- supplementary.pdf Fig. S2,
 - Section 2. Structural design,
 - caption of Fig. 4.
 
@@ -129,7 +132,7 @@ Return only valid JSON following the provided schema.
 DEFAULT_PROMPT = """
 Refer to the uploaded paper.
 
-Identify the metamaterial design rules mentioned in the paper using the text, equations, parameter tables, dimensions, figures, and captions.
+Identify the metamaterial design rules mentioned in the paper and any uploaded supplementary/source files using the text, equations, parameter tables, dimensions, figures, and captions.
 
 Your goal is to create a reconstruction plan that can be used to generate downloadable STL files.
 
@@ -173,6 +176,8 @@ Extract:
 
 8. Assumptions required to generate STL files.
 
+If supplementary information, supporting figures, data tables, or source files are uploaded, use them as first-class evidence. For any figure tracing target, record the source filename in figure_trace_info.source_filename.
+
 If the paper provides complete mathematical design rules, create an exact equation-based reconstruction plan.
 
 If the paper does not provide complete design rules, create the best possible parameter-inferred or figure-traced reconstruction plan, but clearly state that the STL will be approximate.
@@ -183,7 +188,8 @@ You are an expert Python CAD/STL code generator for metamaterial geometries.
 
 You are given:
 1. the original paper PDF,
-2. reconstruction_plan.json extracted from the paper.
+2. any supplementary/source files supplied by the user,
+3. reconstruction_plan.json extracted from those sources.
 
 Write a complete Python builder script to generate STL files for structures that require custom code.
 
@@ -194,6 +200,7 @@ Rules:
 - The builder must be self-contained except importing geometry_helpers.py from the same folder.
 - The builder must accept:
       python generated_builder.py --pdf input.pdf --out output_folder
+- If supplementary/source files are needed locally, read them from the directory path stored in the environment variable STRUCTURE_FINDER_SOURCE_DIR. The primary PDF path is also available as STRUCTURE_FINDER_PRIMARY_PDF.
 - The builder must write:
       output_folder/stl/*.stl
       output_folder/metadata/*.json
@@ -211,13 +218,15 @@ Return only JSON with key builder_code.
 """
 
 CUSTOM_BUILDER_USER_PROMPT = """
-Use the uploaded PDF and reconstruction_plan.json to write a paper-specific Python STL builder.
+Use the uploaded PDF, any uploaded supplementary/source files, and reconstruction_plan.json to write a paper-specific Python STL builder.
 
 Generate only the structures whose generator_type is not handled by the local pipeline, or whose local method needs custom handling:
 parametric_surface, strut_graph_lattice, curved_strut_lattice, two_d_cutout_extrusion,
 tubular_mapping, custom_builder_required, or TPMS with family custom/unknown/requires_mapping.
 
 If the plan says a structure is insufficient or manual_review, do not generate STL for it; write metadata explaining why.
+
+If a plan references a supplementary figure/table/file, use the source filename from the plan and load it from STRUCTURE_FINDER_SOURCE_DIR when local file access is required.
 
 Return only JSON:
 {
@@ -484,6 +493,7 @@ DESIGN_SCHEMA: Dict[str, Any] = {
                             },
                             "solid_is_dark": {"type": "boolean"},
                             "scale_reference": {"type": "string"},
+                            "source_filename": {"type": "string"},
                         },
                         "required": [
                             "needs_figure_tracing",
@@ -492,6 +502,7 @@ DESIGN_SCHEMA: Dict[str, Any] = {
                             "crop_box_relative",
                             "solid_is_dark",
                             "scale_reference",
+                            "source_filename",
                         ],
                     },
                     "construction_steps": {"type": "array", "items": {"type": "string"}},
@@ -598,6 +609,80 @@ def clean_name(name: str) -> str:
     safe = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in name.strip())
     safe = "_".join(part for part in safe.split("_") if part)
     return safe[:100] or "structure"
+
+
+def safe_source_filename(path_or_name: str | Path) -> str:
+    path = Path(path_or_name)
+    stem = clean_name(path.stem)
+    suffix = path.suffix.lower()
+    return f"{stem}{suffix}" if suffix else stem
+
+
+def unique_path(directory: Path, filename: str) -> Path:
+    candidate = directory / filename
+    if not candidate.exists():
+        return candidate
+    stem = candidate.stem
+    suffix = candidate.suffix
+    index = 2
+    while True:
+        candidate = directory / f"{stem}_{index}{suffix}"
+        if not candidate.exists():
+            return candidate
+        index += 1
+
+
+def materialize_source_files(source_paths: Optional[List[Path]], out_dir: Path) -> List[Path]:
+    if not source_paths:
+        return []
+
+    source_dir = out_dir / "source_files"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    materialized: List[Path] = []
+
+    for raw_path in source_paths:
+        src = Path(raw_path)
+        if not src.exists() or not src.is_file():
+            raise FileNotFoundError(f"Supplementary/source file not found: {src}")
+
+        try:
+            if source_dir.resolve() in src.resolve().parents:
+                materialized.append(src)
+                continue
+        except Exception:
+            pass
+
+        dst = unique_path(source_dir, safe_source_filename(src.name))
+        shutil.copy2(src, dst)
+        materialized.append(dst)
+
+    return materialized
+
+
+def source_manifest(primary_pdf: Path, source_paths: Optional[List[Path]] = None) -> str:
+    lines = [f"Primary paper PDF: {primary_pdf.name}"]
+    for index, path in enumerate(source_paths or [], start=1):
+        lines.append(f"Supplementary/source file {index}: {Path(path).name}")
+    return "\n".join(lines)
+
+
+def source_paths_by_name(source_paths: Optional[List[Path]]) -> Dict[str, Path]:
+    out: Dict[str, Path] = {}
+    for path in source_paths or []:
+        p = Path(path)
+        out[p.name.lower()] = p
+        out[p.stem.lower()] = p
+    return out
+
+
+def response_source_item(uploaded_file: Any, path: Path) -> Dict[str, Any]:
+    suffix = path.suffix.lower()
+    if suffix in IMAGE_SOURCE_EXTENSIONS:
+        return {"type": "input_image", "file_id": uploaded_file.id, "detail": "high"}
+    item: Dict[str, Any] = {"type": "input_file", "file_id": uploaded_file.id}
+    if suffix == ".pdf":
+        item["detail"] = "high"
+    return item
 
 
 def write_json(path: Path, data: Dict[str, Any]) -> None:
@@ -740,6 +825,7 @@ def _structure_defaults() -> Dict[str, Any]:
             "crop_box_relative": [0.0, 0.0, 1.0, 1.0],
             "solid_is_dark": True,
             "scale_reference": "",
+            "source_filename": "",
         },
         "construction_steps": [],
         "assumptions": [],
@@ -796,6 +882,7 @@ def upload_file(client: Any, path: Path, purpose: str = "user_data") -> Any:
 
 def extract_reconstruction_plan(
     pdf_path: Path,
+    source_paths: Optional[List[Path]],
     out_dir: Path,
     model: str,
     api_key: str,
@@ -807,13 +894,26 @@ def extract_reconstruction_plan(
         raise RuntimeError("openai package not installed. Run: pip install -r requirements.txt")
     client = OpenAI(api_key=api_key)
 
-    emit(progress, "[INFO] Uploading PDF for plan extraction...")
+    emit(progress, "[INFO] Uploading PDF and source files for plan extraction...")
     pdf_file = upload_file(client, pdf_path)
+    source_files = [upload_file(client, path) for path in source_paths or []]
+
+    manifest = source_manifest(pdf_path, source_paths)
+    (out_dir / "source_manifest.txt").write_text(manifest, encoding="utf-8")
 
     emit(progress, "[INFO] Extracting reconstruction plan...")
     user_content = [
-        {"type": "input_file", "file_id": pdf_file.id},
-        {"type": "input_text", "text": prompt},
+        response_source_item(pdf_file, pdf_path),
+        *[response_source_item(uploaded, path) for uploaded, path in zip(source_files, source_paths or [])],
+        {
+            "type": "input_text",
+            "text": (
+                f"{prompt}\n\nUploaded source manifest:\n{manifest}\n\n"
+                "Use every uploaded source that contains relevant geometry evidence. "
+                "When citing evidence, include the source filename. "
+                "For figure_trace_info.source_filename, use the exact filename from the manifest; use the primary PDF filename if the trace target is in the paper."
+            ),
+        },
     ]
     try:
         plan = call_responses_json(
@@ -1115,6 +1215,27 @@ def render_pdf_page(pdf_path: Path, page_number: int, dpi: int):
     return img
 
 
+def resolve_trace_source(pdf_path: Path, source_paths: Optional[List[Path]], source_filename: str) -> Path:
+    if not source_filename:
+        return pdf_path
+    wanted = source_filename.strip().lower()
+    if wanted in {pdf_path.name.lower(), pdf_path.stem.lower()}:
+        return pdf_path
+    lookup = source_paths_by_name(source_paths)
+    return lookup.get(wanted, pdf_path)
+
+
+def load_trace_source_image(source_path: Path, page_number: int, dpi: int):
+    suffix = source_path.suffix.lower()
+    if suffix == ".pdf":
+        return render_pdf_page(source_path, page_number, dpi=dpi)
+    if suffix in {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}:
+        if Image is None:
+            raise RuntimeError("Pillow is required for image source tracing.")
+        return Image.open(source_path).convert("RGB")
+    raise RuntimeError(f"Cannot image-trace unsupported source file type: {source_path.name}")
+
+
 def remove_small_objects_compat(mask: np.ndarray, threshold: int) -> np.ndarray:
     try:
         return morphology.remove_small_objects(mask, max_size=threshold)
@@ -1165,6 +1286,7 @@ def image_to_mask(img: Any, solid_is_dark: bool, max_pixels: int, min_object_pix
 
 def generate_image_trace_local(
     pdf_path: Path,
+    source_paths: Optional[List[Path]],
     structure: Dict[str, Any],
     out_dir: Path,
     dpi: int,
@@ -1186,13 +1308,14 @@ def generate_image_trace_local(
     page = int(trace_page_override or fig.get("best_page_number") or 1)
     crop = crop_override or fig.get("crop_box_relative") or [0.0, 0.0, 1.0, 1.0]
     solid_is_dark = bool(fig.get("solid_is_dark", True))
+    trace_source = resolve_trace_source(pdf_path, source_paths, str(fig.get("source_filename", "")))
 
     dims = structure["dimensions_mm"]
     width = width_override or get_number(dims.get("width_x"), 50.0) or 50.0
     height = height_override or get_number(dims.get("height_y"), 50.0) or 50.0
     depth = depth_override or get_number(dims.get("depth_z"), 3.0) or 3.0
 
-    page_img = render_pdf_page(pdf_path, page, dpi=dpi)
+    page_img = load_trace_source_image(trace_source, page, dpi=dpi)
     crop_img = crop_relative(page_img, crop)
     mask = image_to_mask(crop_img, solid_is_dark, max_trace_pixels, min_object_pixels)
 
@@ -1221,7 +1344,12 @@ def generate_image_trace_local(
         "generator_type": "image_trace_extrusion",
         "reconstruction_level": structure["reconstruction_level"],
         "confidence_0_to_1": structure["confidence_0_to_1"],
-        "figure_trace_info": {**fig, "used_page": page, "used_crop_box_relative": crop},
+        "figure_trace_info": {
+            **fig,
+            "used_source_filename": trace_source.name,
+            "used_page": page,
+            "used_crop_box_relative": crop,
+        },
         "assumptions": structure.get("assumptions", []),
         "missing_information": structure.get("missing_information", []),
         "dimensions_used_mm": {"width_x": width, "height_y": height, "depth_z": depth},
@@ -1234,6 +1362,7 @@ def generate_image_trace_local(
 
 def run_local_generators(
     pdf_path: Path,
+    source_paths: Optional[List[Path]],
     plan: Dict[str, Any],
     out_dir: Path,
     args: argparse.Namespace,
@@ -1263,6 +1392,7 @@ def run_local_generators(
             elif gen == "image_trace_extrusion":
                 stl = generate_image_trace_local(
                     pdf_path=pdf_path,
+                    source_paths=source_paths,
                     structure=structure,
                     out_dir=out_dir,
                     dpi=args.dpi,
@@ -1312,6 +1442,7 @@ def write_temp_plan_for_builder(plan: Dict[str, Any], out_dir: Path) -> Path:
 
 def call_custom_builder_model(
     pdf_path: Path,
+    source_paths: Optional[List[Path]],
     plan_path: Path,
     model: str,
     api_key: str,
@@ -1326,19 +1457,27 @@ def call_custom_builder_model(
 
     emit(progress, "[INFO] Uploading files for custom builder...")
     pdf_file = upload_file(client, pdf_path)
+    source_files = [upload_file(client, path) for path in source_paths or []]
     plan_file = upload_file(client, plan_path)
+    manifest = source_manifest(pdf_path, source_paths)
 
     user_text = CUSTOM_BUILDER_USER_PROMPT
     if repair_log is not None and previous_code is not None:
         user_text = REPAIR_BUILDER_PROMPT_TEMPLATE.format(log=repair_log[-12000:], code=previous_code[-24000:])
+    user_text = (
+        f"{user_text}\n\nUploaded source manifest:\n{manifest}\n\n"
+        "The generated builder will be run locally with STRUCTURE_FINDER_SOURCE_DIR pointing to a directory containing the supplementary/source files listed above. "
+        "The primary PDF is passed via --pdf and also exposed as STRUCTURE_FINDER_PRIMARY_PDF."
+    )
 
     result = call_responses_json(
         client=client,
         model=model,
         system_prompt=CUSTOM_BUILDER_SYSTEM_PROMPT,
         user_content=[
-            {"type": "input_file", "file_id": pdf_file.id},
-            {"type": "input_file", "file_id": plan_file.id},
+            response_source_item(pdf_file, pdf_path),
+            *[response_source_item(uploaded, path) for uploaded, path in zip(source_files, source_paths or [])],
+            response_source_item(plan_file, plan_path),
             {"type": "input_text", "text": user_text},
         ],
         schema=CUSTOM_BUILDER_SCHEMA,
@@ -1352,6 +1491,7 @@ def call_custom_builder_model(
 def run_builder_script(
     builder_path: Path,
     pdf_path: Path,
+    source_paths: Optional[List[Path]],
     out_dir: Path,
     timeout_s: int,
     max_export_faces: Optional[int],
@@ -1368,10 +1508,15 @@ def run_builder_script(
     builder_out.mkdir(parents=True, exist_ok=True)
 
     cmd = [sys.executable, str(builder_path), "--pdf", str(pdf_path), "--out", str(builder_out)]
+    env = os.environ.copy()
+    env["STRUCTURE_FINDER_PRIMARY_PDF"] = str(pdf_path)
+    if source_paths:
+        env["STRUCTURE_FINDER_SOURCE_DIR"] = str(Path(source_paths[0]).parent.resolve())
     try:
         proc = subprocess.run(
             cmd,
             cwd=str(builder_path.parent),
+            env=env,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -1418,6 +1563,7 @@ def run_builder_script(
 
 def run_custom_builder_loop(
     pdf_path: Path,
+    source_paths: Optional[List[Path]],
     plan: Dict[str, Any],
     out_dir: Path,
     model: str,
@@ -1439,6 +1585,7 @@ def run_custom_builder_loop(
         emit(progress, f"[INFO] Requesting custom builder attempt {attempt}...")
         code = call_custom_builder_model(
             pdf_path=pdf_path,
+            source_paths=source_paths,
             plan_path=plan_path,
             model=model,
             api_key=api_key,
@@ -1452,7 +1599,7 @@ def run_custom_builder_loop(
         builder_path.write_text(code, encoding="utf-8")
 
         emit(progress, f"[INFO] Running custom builder attempt {attempt}...")
-        success, log, stls = run_builder_script(builder_path, pdf_path, out_dir, timeout_s, max_export_faces)
+        success, log, stls = run_builder_script(builder_path, pdf_path, source_paths, out_dir, timeout_s, max_export_faces)
         (out_dir / f"custom_builder_log_attempt_{attempt}.txt").write_text(log, encoding="utf-8")
 
         if success:
@@ -1480,6 +1627,12 @@ def write_main_report(
         lines.append(f"**Identifier:** {plan['doi_or_identifier']}")
     lines.append(f"**Overall confidence:** {plan.get('overall_confidence_0_to_1', 0):.2f}\n")
     lines.append(plan.get("reconstruction_summary", "") + "\n")
+    manifest_path = out_dir / "source_manifest.txt"
+    if manifest_path.exists():
+        lines.append("## Uploaded sources")
+        for line in manifest_path.read_text(encoding="utf-8").splitlines():
+            lines.append(f"- {line}")
+        lines.append("")
 
     lines.append("## Global assumptions")
     for x in plan.get("global_assumptions", []):
@@ -1550,6 +1703,7 @@ def zip_output(out_dir: Path) -> Path:
 def run_pipeline(
     pdf_path: Path,
     out_dir: Path,
+    source_paths: Optional[List[Path]] = None,
     model: str = DEFAULT_MODEL,
     api_key: Optional[str] = None,
     ask_api_key: bool = False,
@@ -1582,6 +1736,8 @@ def run_pipeline(
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "stl").mkdir(exist_ok=True)
     (out_dir / "metadata").mkdir(exist_ok=True)
+    source_paths = materialize_source_files(source_paths, out_dir)
+    (out_dir / "source_manifest.txt").write_text(source_manifest(pdf_path, source_paths), encoding="utf-8")
 
     if prompt_file:
         prompt = prompt_file.read_text(encoding="utf-8")
@@ -1597,6 +1753,7 @@ def run_pipeline(
             raise RuntimeError("No OpenAI API key. Use .env, OPENAI_API_KEY, --api-key, or --ask-api-key.")
         plan = extract_reconstruction_plan(
             pdf_path=pdf_path,
+            source_paths=source_paths,
             out_dir=out_dir,
             model=model,
             api_key=resolved_key,
@@ -1620,7 +1777,7 @@ def run_pipeline(
         max_export_faces=max_export_faces,
         save_debug=save_debug,
     )
-    local_generated, local_messages = run_local_generators(pdf_path, plan, out_dir, args)
+    local_generated, local_messages = run_local_generators(pdf_path, source_paths, plan, out_dir, args)
 
     custom_messages: List[str] = []
     if plan_needs_custom_builder(plan, force_custom_builder):
@@ -1629,6 +1786,7 @@ def run_pipeline(
         else:
             _, custom_messages = run_custom_builder_loop(
                 pdf_path=pdf_path,
+                source_paths=source_paths,
                 plan=plan,
                 out_dir=out_dir,
                 model=model,
@@ -1661,6 +1819,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--prompt-file", type=Path, default=None, help="Optional custom extraction prompt file.")
     parser.add_argument("--plan-json", type=Path, default=None, help="Reuse an existing reconstruction_plan.json.")
+    parser.add_argument(
+        "--source-file",
+        type=Path,
+        action="append",
+        default=[],
+        help="Supplementary/source file to use with the primary PDF. Can be passed multiple times.",
+    )
     parser.add_argument("--force-custom-builder", action="store_true", help="Always ask GPT to write a custom builder.")
     parser.add_argument("--resolution-per-cell", type=int, default=DEFAULT_RESOLUTION_PER_CELL)
     parser.add_argument("--max-grid", type=int, default=DEFAULT_MAX_GRID)
@@ -1685,6 +1850,7 @@ def main() -> None:
     success, bundle = run_pipeline(
         pdf_path=args.pdf,
         out_dir=args.out,
+        source_paths=args.source_file,
         model=args.model,
         api_key=args.api_key,
         ask_api_key=args.ask_api_key,
