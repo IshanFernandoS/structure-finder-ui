@@ -100,6 +100,7 @@ Use only evidence from the uploaded sources:
 - visible figures,
 - supplementary material,
 - uploaded figures/tables/data files.
+- uploaded CAD, STL, Surface Evolver, or finite-element mesh files when supplied.
 
 Do not hallucinate missing CAD details.
 
@@ -176,7 +177,9 @@ Extract:
 
 8. Assumptions required to generate STL files.
 
-If supplementary information, supporting figures, data tables, or source files are uploaded, use them as first-class evidence. For any figure tracing target, record the source filename in figure_trace_info.source_filename.
+If supplementary information, supporting figures, data tables, CAD/STL files, Surface Evolver files, or finite-element files are uploaded, use them as first-class evidence.
+For any figure tracing target, record the source filename in figure_trace_info.source_filename.
+If an uploaded FE mesh/source geometry file directly defines node coordinates, elements, surfaces, STL triangles, or CAD geometry, prefer using that file for geometry generation and cite it in the plan.
 
 If the paper provides complete mathematical design rules, create an exact equation-based reconstruction plan.
 
@@ -211,8 +214,9 @@ Rules:
 - Generate final-quality meshes, not coarse previews. For implicit or voxel geometry, use high enough sampling to avoid visibly blocky surfaces.
 - Keep exported STL files browser- and download-friendly. Target no more than about 800,000 triangles per STL unless the paper explicitly needs finer resolution.
 - Smooth only faceted marching-cubes or image-traced surfaces when the paper structure is smooth/curved, using light smoothing that preserves the bounding box and pore topology.
-- Use helper functions from geometry_helpers.py when useful. Use export_mesh(..., smooth_iterations=0, max_faces=800000) by default; pass a small smoothing value only for smooth curved voxel/implicit outputs and report it in metadata.
+- Use helper functions from geometry_helpers.py when useful, including load_source_geometry_mesh for uploaded STL/CAD/FE mesh sources. Use export_mesh(..., smooth_iterations=0, max_faces=800000) by default; pass a small smoothing value only for smooth curved voxel/implicit outputs and report it in metadata.
 - For filled implicit solids, use scalar_field_to_mesh(...). For TPMS/shell-type level sets, use scalar_shell_to_mesh(...).
+- For uploaded finite-element or mesh files, prefer geometry_helpers.load_source_geometry_mesh(...) or meshio.read(...) to extract nodes/elements/surface faces, then export a validated STL.
 - Do not access the internet.
 Return only JSON with key builder_code.
 """
@@ -226,7 +230,8 @@ tubular_mapping, custom_builder_required, or TPMS with family custom/unknown/req
 
 If the plan says a structure is insufficient or manual_review, do not generate STL for it; write metadata explaining why.
 
-If a plan references a supplementary figure/table/file, use the source filename from the plan and load it from STRUCTURE_FINDER_SOURCE_DIR when local file access is required.
+If a plan references a supplementary figure/table/CAD/STL/FE/source file, use the source filename from the plan and load it from STRUCTURE_FINDER_SOURCE_DIR when local file access is required.
+For FE files such as .inp, .msh, .vtk, or .vtu, use meshio or geometry_helpers.load_source_geometry_mesh to convert the node/element data into a surface mesh when possible.
 
 Return only JSON:
 {

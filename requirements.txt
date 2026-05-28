@@ -3,6 +3,7 @@ numpy>=1.26
 scikit-image>=0.23
 trimesh>=4.0
 fast-simplification>=0.1.7
+meshio>=5.3
 pymupdf>=1.24
 pillow>=10.0
 opencv-python-headless>=4.9

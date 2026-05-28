@@ -5,7 +5,7 @@ Reusable geometry primitives for GPT-generated metamaterial STL builders.
 The generated builder script may import these functions.
 
 Dependencies:
-numpy, trimesh, scikit-image, pillow, opencv-python, pymupdf
+numpy, trimesh, scikit-image, pillow, opencv-python, pymupdf, meshio
 """
 
 from __future__ import annotations
@@ -29,6 +29,11 @@ except Exception:
     cv2 = None
     fitz = None
     Image = None
+
+try:
+    import meshio
+except Exception:
+    meshio = None
 
 
 def clean_name(name: str) -> str:
@@ -148,6 +153,90 @@ def mesh_validation_report(mesh: trimesh.Trimesh) -> dict:
         "watertight": bool(mesh.is_watertight),
         "connected_components": int(components),
     }
+
+
+def _triangulate_face(face: Sequence[int]) -> List[List[int]]:
+    face = [int(v) for v in face]
+    if len(face) == 3:
+        return [face]
+    if len(face) == 4:
+        return [[face[0], face[1], face[2]], [face[0], face[2], face[3]]]
+    if len(face) > 4:
+        return [[face[0], face[i], face[i + 1]] for i in range(1, len(face) - 1)]
+    return []
+
+
+def _boundary_faces_from_volume_cells(cell_type: str, cells: np.ndarray) -> List[List[int]]:
+    templates = {
+        "tetra": [(0, 2, 1), (0, 1, 3), (1, 2, 3), (2, 0, 3)],
+        "tetra10": [(0, 2, 1), (0, 1, 3), (1, 2, 3), (2, 0, 3)],
+        "hexahedron": [(0, 1, 2, 3), (4, 7, 6, 5), (0, 4, 5, 1), (1, 5, 6, 2), (2, 6, 7, 3), (3, 7, 4, 0)],
+        "hexahedron20": [(0, 1, 2, 3), (4, 7, 6, 5), (0, 4, 5, 1), (1, 5, 6, 2), (2, 6, 7, 3), (3, 7, 4, 0)],
+        "wedge": [(0, 2, 1), (3, 4, 5), (0, 3, 5, 2), (1, 2, 5, 4), (0, 1, 4, 3)],
+        "pyramid": [(0, 3, 2, 1), (0, 1, 4), (1, 2, 4), (2, 3, 4), (3, 0, 4)],
+    }
+    template = templates.get(cell_type)
+    if template is None:
+        return []
+
+    counts: dict[tuple[int, ...], List[int] | None] = {}
+    for cell in np.asarray(cells, dtype=int):
+        for local_face in template:
+            face = [int(cell[i]) for i in local_face]
+            key = tuple(sorted(face))
+            counts[key] = None if key in counts else face
+
+    boundary: List[List[int]] = []
+    for face in counts.values():
+        if face is not None:
+            boundary.extend(_triangulate_face(face))
+    return boundary
+
+
+def load_source_geometry_mesh(path: str | Path) -> trimesh.Trimesh:
+    """Load a surface mesh or extract the exterior surface from common FE mesh files.
+
+    Supported directly by trimesh: STL/OBJ/PLY/OFF/GLB/GLTF/3MF.
+    Supported through meshio when installed: Abaqus INP, Gmsh MSH, VTK/VTU,
+    Exodus, MED, Nastran BDF/NAS, and other meshio-readable formats.
+    """
+    path = Path(path)
+    suffix = path.suffix.lower()
+
+    if suffix in {".stl", ".obj", ".ply", ".off", ".glb", ".gltf", ".3mf"}:
+        loaded = trimesh.load(path, force="scene" if suffix in {".glb", ".gltf", ".3mf"} else "mesh")
+        if isinstance(loaded, trimesh.Scene):
+            meshes = [geom for geom in loaded.geometry.values() if isinstance(geom, trimesh.Trimesh)]
+            return combine_meshes(meshes)
+        return loaded
+
+    if meshio is None:
+        raise RuntimeError("meshio is required to load FE mesh files. Install meshio or use STL/OBJ/PLY.")
+
+    mesh = meshio.read(path)
+    points = np.asarray(mesh.points, dtype=float)
+    if points.shape[1] == 2:
+        points = np.column_stack([points, np.zeros(len(points))])
+    points = points[:, :3]
+
+    surface_faces: List[List[int]] = []
+    boundary_faces: List[List[int]] = []
+    for block in mesh.cells:
+        cell_type = block.type
+        data = np.asarray(block.data, dtype=int)
+        if cell_type.startswith("triangle"):
+            surface_faces.extend([list(map(int, row[:3])) for row in data])
+        elif cell_type.startswith("quad"):
+            for row in data:
+                surface_faces.extend(_triangulate_face(row[:4]))
+        else:
+            boundary_faces.extend(_boundary_faces_from_volume_cells(cell_type, data))
+
+    faces = surface_faces or boundary_faces
+    if not faces:
+        raise ValueError(f"No surface or supported volume elements found in {path.name}.")
+
+    return trimesh.Trimesh(vertices=points, faces=np.asarray(faces, dtype=int), process=True)
 
 
 def export_mesh(
